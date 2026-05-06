@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Data - contains patient records, never commit
+data/
+!data/.gitkeep
+
+# Experiment outputs - large files, regenerate with code
+experiments/
+!experiments/.gitkeep
+
+# Documents - PDFs, papers, personal notes
+documents/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs and local artifacts
+*.log
+*.pkl
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+Thumbs.db

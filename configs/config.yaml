@@ -1,0 +1,103 @@
+project:
+  name: texas100x-kd-mia
+  seed: 509
+  device: auto
+
+paths:
+  data_root: data/texas100x
+  processed_root: data/processed
+  experiment_root: experiments
+  checkpoint_dir: experiments/checkpoints
+  soft_label_dir: experiments/soft_labels
+  figure_dir: experiments/figures
+  results_csv: experiments/results.csv
+
+data:
+  csv_file: texas_100x.csv
+  raw_dir: raw
+  raw_glob: "PUDF_base*q*_tab.txt"
+  features_pickle: texas_100x_features.p
+  labels_pickle: texas_100x_labels.p
+  feature_desc_pickle: texas_100x_feature_desc.p
+  label_column: PRINC_SURG_PROC_CODE
+  excluded_columns:
+    - THCIC_ID
+  raw_feature_columns:
+    - THCIC_ID
+    - SEX_CODE
+    - TYPE_OF_ADMISSION
+    - SOURCE_OF_ADMISSION
+    - LENGTH_OF_STAY
+    - PAT_AGE
+    - PAT_STATUS
+    - RACE
+    - ETHNICITY
+    - TOTAL_CHARGES
+    - ADMITTING_DIAGNOSIS
+  top_procedure_classes: 100
+  train_size: 50000
+  val_size: 10000
+  test_size: 50000
+  batch_size: 256
+  num_workers: 0
+
+model:
+  input_dim: null
+  num_classes: 100
+  teacher_type: tabular_mlp
+  hidden_dims:
+    - 512
+    - 512
+    - 256
+  embedding_dim: 16
+  dropout: 0.05
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 75
+  class_weighted_loss: false
+  scheduler:
+    enabled: true
+    step_size: 20
+    gamma: 0.5
+  compile: false
+
+student:
+  hidden_dims:
+    - 128
+    - 64
+  temperature: 4.0
+  alpha: 0.5
+  epochs: 25
+
+mitigations:
+  confidence_filter:
+    top_fraction: 0.1
+  bottleneck:
+    rank: 32
+  nonorm:
+    enabled: true
+
+attacks:
+  low_fpr_targets:
+    - 0.001
+    - 0.005
+    - 0.01
+  shadow:
+    num_models: 4
+    epochs: 10
+  lira:
+    num_reference_models: 8
+    epochs: 10
+  lira_full:
+    num_reference_models: 64
+    reference_model_epochs: 5
+    reference_model_hidden_dims:
+      - 128
+      - 64
+    reference_sample_fraction: 0.5
+    cache_dir: experiments/lira_cache
+
+synthetic:
+  num_samples: 2048
+  num_features: 10
+  num_classes: 100
