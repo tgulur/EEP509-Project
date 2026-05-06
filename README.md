@@ -1,6 +1,8 @@
-# Texas-100X KD-MIA Pipeline
+# Membership Inference Attacks on Knowledge Distillation
 
-This repository implements the EE P 509 project described in `cursorrules.md`: membership inference attacks against knowledge-distilled models on Texas-100X.
+EE P 509 A Project — Tejas Gulur
+
+Empirical evaluation of whether knowledge distillation preserves, transfers, or amplifies membership inference vulnerability on the Texas-100X healthcare dataset.
 
 ## Setup
 

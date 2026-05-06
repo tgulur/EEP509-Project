@@ -25,6 +25,7 @@ documents/
 # IDE / Editor
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 .DS_Store
