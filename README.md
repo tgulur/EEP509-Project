@@ -54,3 +54,9 @@ python main.py smoke --synthetic
 - Cached soft labels: `experiments/soft_labels/`
 - Result table: `experiments/results.csv`
 - Figures: `experiments/figures/`
+
+## AI Note: 
+
+The repo scaffolding was written by an AI Agent (cursor AI) as well as debugging the code with an AI agent. This README (up until the AI note) was also written by an AI agent so that I can remember how some features work. I've also asked AI to leave some helpful comments and lintering across the files so that I can come back and fix what needs to be done. 
+
+For debugging purposes I utilized Claude Code to help as well. That's why you'll see some test files in tests folder to verify the fix went through and it won't break again in the current pipeline/implementation

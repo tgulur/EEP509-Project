@@ -219,8 +219,30 @@ def main() -> None:
         student = build_student(input_dim, int(config["model"]["num_classes"]), list(config["student"]["hidden_dims"]), float(config["model"]["dropout"]))
         train_student(student, teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/student.pt")
 
-    if args.stage in {"train-mitigated", "all"}:
-        _build_mitigated_models(input_dim, config)
+    if args.stage in {"train-mitigated", "all", "smoke"}:
+        if teacher is None:
+            teacher = build_teacher(
+                input_dim,
+                int(config["model"]["num_classes"]),
+                list(config["model"]["hidden_dims"]),
+                float(config["model"]["dropout"]),
+                teacher_type=str(config["model"].get("teacher_type", "mlp")),
+                metadata=feature_metadata,
+                embedding_dim=int(config["model"].get("embedding_dim", 16)),
+            )
+            _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+        mitigated_models = _build_mitigated_models(input_dim, config)
+        for name, mitigated_model in mitigated_models.items():
+            print(f"\n--- Training mitigated student: {name} ---")
+            train_student(
+                mitigated_model,
+                teacher,
+                loaders["train"],
+                loaders["test"],
+                device,
+                config,
+                f"experiments/checkpoints/student_{name}.pt",
+            )
 
     if args.stage in {"run-attacks", "all", "smoke"}:
         run_attack_suite(input_dim, loaders, device, config, feature_metadata)
