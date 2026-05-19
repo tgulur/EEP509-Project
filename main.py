@@ -9,7 +9,15 @@ Run `python main.py --help` for usage. Most common:
 from __future__ import annotations
 
 import argparse
+import json
+from datetime import datetime
 from pathlib import Path
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from data_utils.splits import SplitIndices
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,8 +55,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def generate_run_id() -> str:
-    """Generate a datetime-stamped run identifier."""
-    from datetime import datetime
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
@@ -73,9 +79,7 @@ def setup_run_paths(config: dict, run_id: str) -> None:
 
 def save_run_metadata(config: dict, args: argparse.Namespace) -> None:
     """Save config and run metadata to the run folder for reproducibility."""
-    import json
     import yaml
-    from datetime import datetime
 
     run_dir = Path(config["paths"]["experiment_root"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -97,9 +101,6 @@ def save_run_metadata(config: dict, args: argparse.Namespace) -> None:
 
 
 def list_runs(config: dict) -> None:
-    """List all previous experiment runs with their metadata."""
-    import json
-
     runs_dir = Path(config["paths"]["experiment_root"]) / "runs"
     if not runs_dir.exists():
         print("No experiment runs found.")
@@ -140,11 +141,26 @@ def list_runs(config: dict) -> None:
     print(f"Resume a run with: python main.py <stage> --resume-run <run-id>")
 
 
+def _make_teacher(input_dim: int, config: dict, feature_metadata: dict[str, object]):
+    # all five call sites used the exact same kwargs - pull it out
+    from models.teacher import build_teacher
+
+    return build_teacher(
+        input_dim,
+        int(config["model"]["num_classes"]),
+        list(config["model"]["hidden_dims"]),
+        float(config["model"]["dropout"]),
+        teacher_type=str(config["model"].get("teacher_type", "mlp")),
+        metadata=feature_metadata,
+        embedding_dim=int(config["model"].get("embedding_dim", 16)),
+    )
+
+
 def main() -> None:
     args = parse_args()
     from evaluation.plots import make_all_plots
     from models.student import build_student, train_student
-    from models.teacher import build_teacher, train_teacher
+    from models.teacher import train_teacher
     from utils import load_config, resolve_device, set_seed
 
     config = load_config(args.config)
@@ -193,43 +209,19 @@ def main() -> None:
     feature_metadata = get_feature_metadata(config)
 
     if args.stage in {"train-teacher", "all", "smoke"}:
-        teacher = build_teacher(
-            input_dim,
-            int(config["model"]["num_classes"]),
-            list(config["model"]["hidden_dims"]),
-            float(config["model"]["dropout"]),
-            teacher_type=str(config["model"].get("teacher_type", "mlp")),
-            metadata=feature_metadata,
-            embedding_dim=int(config["model"].get("embedding_dim", 16)),
-        )
+        teacher = _make_teacher(input_dim, config, feature_metadata)
         train_teacher(teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/teacher.pt")
 
     if args.stage in {"train-student", "all", "smoke"}:
         if teacher is None:
-            teacher = build_teacher(
-                input_dim,
-                int(config["model"]["num_classes"]),
-                list(config["model"]["hidden_dims"]),
-                float(config["model"]["dropout"]),
-                teacher_type=str(config["model"].get("teacher_type", "mlp")),
-                metadata=feature_metadata,
-                embedding_dim=int(config["model"].get("embedding_dim", 16)),
-            )
+            teacher = _make_teacher(input_dim, config, feature_metadata)
             _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
         student = build_student(input_dim, int(config["model"]["num_classes"]), list(config["student"]["hidden_dims"]), float(config["model"]["dropout"]))
         train_student(student, teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/student.pt")
 
     if args.stage in {"train-mitigated", "all", "smoke"}:
         if teacher is None:
-            teacher = build_teacher(
-                input_dim,
-                int(config["model"]["num_classes"]),
-                list(config["model"]["hidden_dims"]),
-                float(config["model"]["dropout"]),
-                teacher_type=str(config["model"].get("teacher_type", "mlp")),
-                metadata=feature_metadata,
-                embedding_dim=int(config["model"].get("embedding_dim", 16)),
-            )
+            teacher = _make_teacher(input_dim, config, feature_metadata)
             _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
         mitigated_models = _build_mitigated_models(input_dim, config)
         for name, mitigated_model in mitigated_models.items():
@@ -289,8 +281,6 @@ def _load_if_exists(model: torch.nn.Module, checkpoint_path: str, device: torch.
 
 
 def prepare_arrays(config: dict, synthetic: bool = False) -> tuple[np.ndarray, np.ndarray, SplitIndices]:
-    import numpy as np
-
     from data_utils.splits import make_split_indices
     from data_utils.texas100x import load_texas100x_arrays, make_synthetic_texas100x
 
@@ -355,8 +345,6 @@ def ensure_processed_texas100x(config: dict) -> Path:
 
 
 def make_loaders(features: np.ndarray, labels: np.ndarray, splits: SplitIndices, batch_size: int) -> dict[str, DataLoader]:
-    from torch.utils.data import DataLoader
-
     from data_utils.texas100x import Texas100XDataset
 
     train_dataset = Texas100XDataset(features, labels, member_indices=splits.train, indices=splits.train)
@@ -395,8 +383,6 @@ def compute_sample_metadata(
     device: torch.device,
 ) -> dict[str, np.ndarray]:
     """Compute per-sample metadata: indices, labels, loss, confidence."""
-    import numpy as np
-    import torch
     import torch.nn.functional as F
 
     model.to(device)
@@ -455,8 +441,6 @@ def run_attacks(
     mitigation: str,
     utility_metadata: dict[str, object] | None = None,
 ) -> None:
-    import numpy as np
-
     from attacks.lira import LiRAAttack
     from attacks.loss_based import LossBasedAttack
     from attacks.shadow import ShadowModelAttack
@@ -507,7 +491,6 @@ def save_attack_scores(
     member_metadata: dict[str, np.ndarray] | None = None,
     non_member_metadata: dict[str, np.ndarray] | None = None,
 ) -> None:
-    import numpy as np
     import pandas as pd
 
     analysis_dir = Path(config["paths"]["experiment_root"]) / "analysis"
@@ -545,17 +528,8 @@ def run_attack_suite(
     feature_metadata: dict[str, object],
 ) -> None:
     from models.student import build_student
-    from models.teacher import build_teacher
 
-    teacher = build_teacher(
-        input_dim,
-        int(config["model"]["num_classes"]),
-        list(config["model"]["hidden_dims"]),
-        float(config["model"]["dropout"]),
-        teacher_type=str(config["model"].get("teacher_type", "mlp")),
-        metadata=feature_metadata,
-        embedding_dim=int(config["model"].get("embedding_dim", 16)),
-    )
+    teacher = _make_teacher(input_dim, config, feature_metadata)
     teacher_metadata = _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
     if teacher_metadata:
         run_attacks(
@@ -598,24 +572,13 @@ def run_full_lira_stage(
     config: dict,
     feature_metadata: dict[str, object],
 ) -> None:
-    """Run full LiRA attack with multiple reference models."""
-    import numpy as np
-
+    """Run full LiRA with N reference models. GPU hours, not engineering."""
     from attacks.lira_full import run_full_lira
     from evaluation.metrics import append_result, attack_metrics
-    from models.teacher import build_teacher
 
     print("Running full LiRA attack with reference models...")
 
-    teacher = build_teacher(
-        input_dim,
-        int(config["model"]["num_classes"]),
-        list(config["model"]["hidden_dims"]),
-        float(config["model"]["dropout"]),
-        teacher_type=str(config["model"].get("teacher_type", "mlp")),
-        metadata=feature_metadata,
-        embedding_dim=int(config["model"].get("embedding_dim", 16)),
-    )
+    teacher = _make_teacher(input_dim, config, feature_metadata)
     teacher_metadata = _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
 
     if not teacher_metadata:

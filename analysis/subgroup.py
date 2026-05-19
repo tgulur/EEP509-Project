@@ -8,7 +8,6 @@ high-loss samples are way more vulnerable than the average suggests.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -57,16 +56,7 @@ def stratify_by_confidence(
     bins: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
     labels: tuple[str, ...] = ("conf_0-25%", "conf_25-50%", "conf_50-75%", "conf_75-100%"),
 ) -> dict[str, pd.DataFrame]:
-    """Bin samples by model confidence for the true class.
-
-    Args:
-        scores_df: Attack scores with 'confidence' column
-        bins: Confidence bin edges
-        labels: Names for each bin
-
-    Returns:
-        Dictionary mapping bin label to filtered DataFrame
-    """
+    """Bin by model confidence on the true class."""
     if "confidence" not in scores_df.columns:
         raise ValueError("scores_df must have 'confidence' column")
 
@@ -86,16 +76,9 @@ def stratify_by_loss_quantile(
     quantiles: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
     labels: tuple[str, ...] = ("loss_q1_low", "loss_q2", "loss_q3", "loss_q4_high"),
 ) -> dict[str, pd.DataFrame]:
-    """Bin samples by loss quantiles (higher loss = harder samples).
-
-    Args:
-        scores_df: Attack scores with 'loss' column
-        quantiles: Quantile edges (0-1)
-        labels: Names for each quantile bin
-
-    Returns:
-        Dictionary mapping bin label to filtered DataFrame
-    """
+    """Bin by loss quantile. Caveat: the loss-based attack is built on this same
+    signal, so loss-stratified subgroups are partly circular for that attack.
+    Class-frequency and confidence bins are independent and tell the same story."""
     if "loss" not in scores_df.columns:
         raise ValueError("scores_df must have 'loss' column")
 
@@ -126,15 +109,7 @@ def compute_subgroup_metrics(
     subgroups: dict[str, pd.DataFrame],
     fpr_targets: tuple[float, ...] = (0.001, 0.01),
 ) -> pd.DataFrame:
-    """Compute AUC and TPR@FPR metrics for each subgroup.
-
-    Args:
-        subgroups: Dictionary mapping subgroup name to filtered scores DataFrame
-        fpr_targets: FPR thresholds for TPR computation
-
-    Returns:
-        DataFrame with columns: subgroup, n_samples, n_members, auc, tpr_at_X_fpr
-    """
+    """AUC + TPR@FPR per subgroup. NaN when the subgroup has only one membership class."""
     rows = []
     for name, df in subgroups.items():
         if df.empty or df["is_member"].nunique() < 2:
@@ -177,16 +152,6 @@ def run_subgroup_analysis(
     class_counts_df: pd.DataFrame,
     output_dir: Path,
 ) -> dict[str, Path]:
-    """Run full subgroup vulnerability analysis and save results.
-
-    Args:
-        scores_df: Attack scores with metadata columns
-        class_counts_df: Class distribution DataFrame
-        output_dir: Directory to save analysis CSVs
-
-    Returns:
-        Dictionary mapping analysis name to output file path
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
 
@@ -262,15 +227,6 @@ def get_vulnerability_ranking(
     subgroup_summary: pd.DataFrame,
     metric: str = "auc",
 ) -> pd.DataFrame:
-    """Rank subgroups by vulnerability (highest metric = most vulnerable).
-
-    Args:
-        subgroup_summary: Combined subgroup metrics
-        metric: Column to rank by
-
-    Returns:
-        DataFrame sorted by vulnerability (descending)
-    """
     df = subgroup_summary.copy()
     df = df.dropna(subset=[metric])
     df = df.sort_values(metric, ascending=False)

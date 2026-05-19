@@ -1,7 +1,8 @@
-"""Reference model training utilities for full LiRA attack.
+"""Reference model training + confidence cache for full LiRA.
 
-This module handles efficient training of multiple reference models on random
-subsets of the training data, and caches confidences for LiRA scoring.
+The cache stores, for each (reference_model, target_sample) pair, whether the
+sample was IN the model's training subset and what confidence the model gave it.
+That's enough to build per-sample IN/OUT Gaussians at scoring time.
 """
 
 from __future__ import annotations
@@ -9,7 +10,6 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
@@ -19,16 +19,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 @dataclass
 class ReferenceModelCache:
-    """Cache storing reference model membership and confidence information.
-
-    For each reference model i:
-      - membership_masks[i]: boolean array indicating which samples were in training
-      - confidence_matrix[i, j]: confidence of model i on sample j (in logit space)
-
-    For the target model:
-      - target_confidences[j]: confidence of target model on sample j
-    """
-
+    # membership_masks[i, j] = was sample j in the training subset of reference model i?
+    # confidence_matrix[i, j] = model i's logit-space confidence on sample j
+    # target_confidences[j]   = the target model's confidence on sample j
     num_models: int
     target_indices: np.ndarray
     membership_masks: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -36,30 +29,16 @@ class ReferenceModelCache:
     target_confidences: np.ndarray = field(default_factory=lambda: np.array([]))
 
     def get_confidences_for_sample(self, sample_idx: int) -> tuple[np.ndarray, np.ndarray]:
-        """Get in-model and out-model confidences for a specific sample.
-
-        Args:
-            sample_idx: Global sample index
-
-        Returns:
-            Tuple of (in_confidences, out_confidences) arrays
-        """
         if sample_idx not in self._idx_to_pos:
             return np.array([]), np.array([])
-
         pos = self._idx_to_pos[sample_idx]
         in_mask = self.membership_masks[:, pos]
-        out_mask = ~in_mask
-
         confs = self.confidence_matrix[:, pos]
-        return confs[in_mask], confs[out_mask]
+        return confs[in_mask], confs[~in_mask]
 
     def get_target_confidence(self, sample_idx: int) -> float | None:
-        """Get target model's confidence for a sample."""
-        if sample_idx not in self._idx_to_pos:
-            return None
-        pos = self._idx_to_pos[sample_idx]
-        if pos >= len(self.target_confidences):
+        pos = self._idx_to_pos.get(sample_idx)
+        if pos is None or pos >= len(self.target_confidences):
             return None
         return float(self.target_confidences[pos])
 
@@ -72,20 +51,17 @@ class ReferenceModelCache:
         device: torch.device,
         batch_size: int = 256,
     ) -> None:
-        """Compute and store confidences from the target model."""
         self.target_confidences = _compute_confidences(
             model, features, labels, target_indices, device, batch_size
         )
 
     @property
     def _idx_to_pos(self) -> dict[int, int]:
-        """Map global sample index to position in arrays."""
         if not hasattr(self, "_idx_map"):
             self._idx_map = {int(idx): pos for pos, idx in enumerate(self.target_indices)}
         return self._idx_map
 
     def save(self, path: Path) -> None:
-        """Save cache to disk."""
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as f:
             pickle.dump({
@@ -98,17 +74,15 @@ class ReferenceModelCache:
 
     @classmethod
     def load(cls, path: Path) -> "ReferenceModelCache":
-        """Load cache from disk."""
         with path.open("rb") as f:
             data = pickle.load(f)
-        cache = cls(
+        return cls(
             num_models=data["num_models"],
             target_indices=data["target_indices"],
             membership_masks=data["membership_masks"],
             confidence_matrix=data["confidence_matrix"],
             target_confidences=data.get("target_confidences", np.array([])),
         )
-        return cache
 
 
 def train_reference_models(
@@ -126,26 +100,6 @@ def train_reference_models(
     lr: float = 0.001,
     seed: int = 509,
 ) -> ReferenceModelCache:
-    """Train multiple reference models and build confidence cache.
-
-    Args:
-        features: Full feature array (n_samples, n_features)
-        labels: Full label array (n_samples,)
-        target_indices: Indices of samples to evaluate
-        num_models: Number of reference models to train
-        hidden_dims: Hidden layer dimensions for reference models
-        epochs: Training epochs per model
-        sample_fraction: Fraction of data to sample for each model
-        device: Torch device
-        num_classes: Number of output classes
-        cache_dir: Optional directory to cache models
-        batch_size: Training batch size
-        lr: Learning rate
-        seed: Random seed
-
-    Returns:
-        ReferenceModelCache with membership masks and confidence matrix
-    """
     if cache_dir is not None:
         cache_path = cache_dir / f"lira_cache_n{num_models}_f{sample_fraction:.2f}.pkl"
         if cache_path.exists():
@@ -207,7 +161,6 @@ def _build_reference_model(
     hidden_dims: list[int],
     dropout: float = 0.1,
 ) -> nn.Module:
-    """Build a lightweight MLP for reference model training."""
     layers: list[nn.Module] = []
     prev_dim = input_dim
     for dim in hidden_dims:
@@ -231,7 +184,6 @@ def _train_model(
     batch_size: int,
     lr: float,
 ) -> nn.Module:
-    """Train a single reference model."""
     model.to(device)
     model.train()
 
@@ -266,7 +218,7 @@ def _compute_confidences(
     batch_size: int,
     eps: float = 1e-6,
 ) -> np.ndarray:
-    """Compute logit-space confidence on true label for specified indices."""
+    # logit-space confidence on the true label
     model.to(device)
     model.eval()
 

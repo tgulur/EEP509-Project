@@ -39,10 +39,24 @@ def _plot_privacy_utility(frame: pd.DataFrame, output: Path) -> None:
     frame = frame.dropna(subset=["test_acc", "auc"])
     if frame.empty:
         raise ValueError("No rows with numeric `test_acc` and `auc` are available for privacy-utility plotting.")
+    _scatter_privacy_utility(frame, output / "privacy_utility_tradeoff", group_by="attack_type", title="Privacy-utility tradeoff")
 
-    plt.figure(figsize=(6, 4))
+
+def _plot_privacy_utility_by_attack(frame: pd.DataFrame, output: Path) -> None:
+    frame = frame.dropna(subset=["test_acc", "auc"])
     for attack_type, group in frame.groupby("attack_type"):
-        plt.scatter(group["test_acc"], group["auc"], label=attack_type)
+        _scatter_privacy_utility(
+            group,
+            output / f"privacy_utility_{attack_type}",
+            group_by="model_type",
+            title=f"Privacy-utility tradeoff: {attack_type}",
+        )
+
+
+def _scatter_privacy_utility(frame: pd.DataFrame, stem: Path, group_by: str, title: str) -> None:
+    plt.figure(figsize=(6, 4))
+    for name, group in frame.groupby(group_by):
+        plt.scatter(group["test_acc"], group["auc"], label=name)
         for _, row in group.iterrows():
             plt.annotate(
                 _point_label(row),
@@ -53,32 +67,10 @@ def _plot_privacy_utility(frame: pd.DataFrame, output: Path) -> None:
             )
     plt.xlabel("Test accuracy")
     plt.ylabel("Membership inference AUC")
-    plt.title("Privacy-utility tradeoff")
+    plt.title(title)
     plt.legend()
     plt.tight_layout()
-    _save_current(output / "privacy_utility_tradeoff")
-
-
-def _plot_privacy_utility_by_attack(frame: pd.DataFrame, output: Path) -> None:
-    frame = frame.dropna(subset=["test_acc", "auc"])
-    for attack_type, group in frame.groupby("attack_type"):
-        plt.figure(figsize=(6, 4))
-        for model_type, subset in group.groupby("model_type"):
-            plt.scatter(subset["test_acc"], subset["auc"], label=model_type)
-            for _, row in subset.iterrows():
-                plt.annotate(
-                    _point_label(row),
-                    (row["test_acc"], row["auc"]),
-                    textcoords="offset points",
-                    xytext=(4, 4),
-                    fontsize=8,
-                )
-        plt.xlabel("Test accuracy")
-        plt.ylabel("Membership inference AUC")
-        plt.title(f"Privacy-utility tradeoff: {attack_type}")
-        plt.legend()
-        plt.tight_layout()
-        _save_current(output / f"privacy_utility_{attack_type}")
+    _save_current(stem)
 
 
 def _save_current(stem: Path) -> None:
@@ -142,15 +134,7 @@ def plot_subgroup_roc_curves(
     model_type: str = "teacher",
     attack_type: str = "loss_based",
 ) -> None:
-    """Create overlaid ROC curves for different subgroups.
-
-    Args:
-        scores_df: Attack scores with metadata
-        class_counts_df: Class distribution DataFrame
-        output_dir: Directory to save figures
-        model_type: Filter to specific model
-        attack_type: Filter to specific attack
-    """
+    """Overlay ROC curves for class-frequency subgroups of a single model/attack."""
     from sklearn.metrics import RocCurveDisplay
 
     from analysis.subgroup import stratify_by_class_frequency
@@ -191,13 +175,7 @@ def plot_vulnerability_by_class_frequency(
     class_counts_df: pd.DataFrame,
     output_dir: Path,
 ) -> None:
-    """Scatter plot of per-class AUC vs class frequency.
-
-    Args:
-        scores_df: Attack scores with 'label' column
-        class_counts_df: Class distribution DataFrame
-        output_dir: Directory to save figures
-    """
+    """Per-class AUC vs class frequency. Rare classes show up top-left."""
     from sklearn.metrics import roc_auc_score
 
     if "label" not in scores_df.columns:
@@ -252,14 +230,6 @@ def make_subgroup_plots(
     subgroup_summary_csv: str | Path,
     output_dir: str | Path,
 ) -> None:
-    """Generate all subgroup vulnerability plots.
-
-    Args:
-        scores_csv: Path to attack_scores.csv
-        class_dist_csv: Path to class_distribution.csv
-        subgroup_summary_csv: Path to subgroup_summary.csv
-        output_dir: Directory to save figures
-    """
     scores_path = Path(scores_csv)
     class_dist_path = Path(class_dist_csv)
     summary_path = Path(subgroup_summary_csv)

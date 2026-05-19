@@ -89,8 +89,6 @@ class TabularMLPClassifier(nn.Module):
 
 @dataclass
 class TrainResult:
-    """Summary of a completed training run."""
-
     train_loss: float
     train_acc: float
     eval_loss: float
@@ -98,10 +96,7 @@ class TrainResult:
 
 
 def accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
-    """Compute multiclass accuracy for a batch."""
-
-    predictions = logits.argmax(dim=1)
-    return float((predictions == labels).float().mean().item())
+    return float((logits.argmax(dim=1) == labels).float().mean().item())
 
 
 def train_epoch(
@@ -112,8 +107,6 @@ def train_epoch(
     loss_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     criterion: nn.Module | None = None,
 ) -> tuple[float, float]:
-    """Train for one epoch and return average loss and accuracy."""
-
     model.train()
     total_loss = 0.0
     total_correct = 0
@@ -139,8 +132,6 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[float, float]:
-    """Evaluate a model with cross-entropy loss."""
-
     model.eval()
     criterion = nn.CrossEntropyLoss(reduction="sum")
     total_loss = 0.0
@@ -161,16 +152,12 @@ def save_checkpoint(
     model: nn.Module,
     metadata: dict[str, object],
 ) -> None:
-    """Save model weights with experiment metadata."""
-
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": model.state_dict(), "metadata": metadata}, output)
 
 
 def load_checkpoint(path: str | Path, model: nn.Module, device: torch.device) -> dict[str, object]:
-    """Load model weights and return saved metadata."""
-
     checkpoint = torch.load(Path(path), map_location=device)
     model.load_state_dict(checkpoint["state_dict"])
     return dict(checkpoint.get("metadata", {}))
@@ -178,8 +165,6 @@ def load_checkpoint(path: str | Path, model: nn.Module, device: torch.device) ->
 
 @torch.no_grad()
 def predict_logits(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
-    """Collect logits and labels for a loader."""
-
     model.eval()
     logits_out: list[np.ndarray] = []
     labels_out: list[np.ndarray] = []
