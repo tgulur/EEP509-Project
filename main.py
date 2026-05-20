@@ -142,6 +142,12 @@ def list_runs(config: dict) -> None:
     print(f"Resume a run with: python main.py <stage> --resume-run <run-id>")
 
 
+def _checkpoint_path(config: dict, filename: str) -> str:
+    base = "experiments/checkpoints/_synthetic" if config.get("_synthetic") else "experiments/checkpoints"
+    Path(base).mkdir(parents=True, exist_ok=True)
+    return f"{base}/{filename}"
+
+
 def _make_teacher(input_dim: int, config: dict, feature_metadata: dict[str, object]):
     # all five call sites used the exact same kwargs - pull it out
     from models.teacher import build_teacher
@@ -172,6 +178,10 @@ def main() -> None:
 
     if args.stage == "smoke":
         _shrink_for_smoke(config)
+    # synthetic + smoke share checkpoint paths with real runs by default,
+    # which means a quick smoke can stomp on a real teacher. route them to a
+    # sandbox dir instead.
+    config["_synthetic"] = bool(args.synthetic or args.stage == "smoke")
 
     if args.resume_run:
         run_id = args.resume_run
@@ -211,25 +221,25 @@ def main() -> None:
 
     if args.stage in {"train-teacher", "all", "smoke"}:
         teacher = _make_teacher(input_dim, config, feature_metadata)
-        train_teacher(teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/teacher.pt")
+        train_teacher(teacher, loaders["train"], loaders["test"], device, config, _checkpoint_path(config, "teacher.pt"))
 
     if args.stage in {"train-student", "all", "smoke"}:
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
-            _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+            _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
         student = build_student(input_dim, int(config["model"]["num_classes"]), list(config["student"]["hidden_dims"]), float(config["model"]["dropout"]))
-        train_student(student, teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/student.pt")
+        train_student(student, teacher, loaders["train"], loaders["test"], device, config, _checkpoint_path(config, "student.pt"))
 
     if args.stage == "sweep-student":
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
-            _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+            _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
         run_student_alpha_sweep(input_dim, teacher, loaders, device, config)
 
     if args.stage in {"train-mitigated", "all", "smoke"}:
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
-            _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+            _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
         mitigated_models = _build_mitigated_models(input_dim, config)
         for name, mitigated_model in mitigated_models.items():
             print(f"\n--- Training mitigated student: {name} ---")
@@ -240,8 +250,12 @@ def main() -> None:
                 loaders["test"],
                 device,
                 config,
-                f"experiments/checkpoints/student_{name}.pt",
+                _checkpoint_path(config, f"student_{name}.pt"),
             )
+        print("\n--- Training mitigated student: confidence_filter ---")
+        _train_confidence_filtered_student(
+            input_dim, teacher, features, labels, splits, loaders, device, config
+        )
 
     if args.stage in {"run-attacks", "all", "smoke"}:
         run_attack_suite(input_dim, loaders, device, config, feature_metadata)
@@ -362,6 +376,39 @@ def make_loaders(features: np.ndarray, labels: np.ndarray, splits: SplitIndices,
         "val": DataLoader(val_dataset, batch_size=batch_size),
         "test": DataLoader(test_dataset, batch_size=batch_size),
     }
+
+
+def _train_confidence_filtered_student(
+    input_dim: int,
+    teacher: torch.nn.Module,
+    features: np.ndarray,
+    labels: np.ndarray,
+    splits: SplitIndices,
+    loaders: dict[str, DataLoader],
+    device: torch.device,
+    config: dict,
+) -> None:
+    # data-side mitigation: drop the top-N% teacher-confidence samples before distilling
+    from data_utils.texas100x import Texas100XDataset
+    from mitigations.confidence_filter import select_low_confidence_indices
+    from models.student import build_student, train_student
+
+    top_fraction = float(config["mitigations"]["confidence_filter"]["top_fraction"])
+    kept = select_low_confidence_indices(teacher, loaders["train"], device, top_fraction)
+    print(f"keeping {len(kept)} / {len(splits.train)} samples after dropping top {top_fraction:.0%}")
+
+    batch_size = int(config["data"]["batch_size"])
+    train_ds = Texas100XDataset(features, labels, member_indices=splits.train, indices=kept)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+
+    student = build_student(
+        input_dim,
+        int(config["model"]["num_classes"]),
+        list(config["student"]["hidden_dims"]),
+        float(config["model"]["dropout"]),
+    )
+    train_student(student, teacher, train_loader, loaders["test"], device, config,
+                  _checkpoint_path(config, "student_confidence_filter.pt"))
 
 
 def _build_mitigated_models(input_dim: int, config: dict) -> dict[str, torch.nn.Module]:
@@ -534,10 +581,8 @@ def run_attack_suite(
     config: dict,
     feature_metadata: dict[str, object],
 ) -> None:
-    from models.student import build_student
-
     teacher = _make_teacher(input_dim, config, feature_metadata)
-    teacher_metadata = _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+    teacher_metadata = _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
     if teacher_metadata:
         run_attacks(
             teacher,
@@ -550,24 +595,41 @@ def run_attack_suite(
             utility_metadata=teacher_metadata,
         )
 
-    student = build_student(
-        input_dim,
-        int(config["model"]["num_classes"]),
-        list(config["student"]["hidden_dims"]),
-        float(config["model"]["dropout"]),
-    )
-    student_metadata = _load_if_exists(student, "experiments/checkpoints/student.pt", device)
-    if student_metadata:
+    # baseline student + each mitigation variant. checkpoints we don't have are silently skipped.
+    student_variants = [
+        ("none", "student.pt"),
+        ("bottleneck", "student_bottleneck.pt"),
+        ("nonorm", "student_nonorm.pt"),
+        ("confidence_filter", "student_confidence_filter.pt"),
+    ]
+    for mitigation, ckpt_name in student_variants:
+        model = _build_student_for_mitigation(mitigation, input_dim, config)
+        md = _load_if_exists(model, _checkpoint_path(config, ckpt_name), device)
+        if not md:
+            continue
         run_attacks(
-            student,
+            model,
             loaders["train"],
             loaders["test"],
             device,
             config,
             model_type="student",
-            mitigation="none",
-            utility_metadata=student_metadata,
+            mitigation=mitigation,
+            utility_metadata=md,
         )
+
+
+def _build_student_for_mitigation(name: str, input_dim: int, config: dict) -> torch.nn.Module:
+    from models.student import build_student
+
+    if name in ("none", "confidence_filter"):
+        return build_student(
+            input_dim,
+            int(config["model"]["num_classes"]),
+            list(config["student"]["hidden_dims"]),
+            float(config["model"]["dropout"]),
+        )
+    return _build_mitigated_models(input_dim, config)[name]
 
 
 def run_full_lira_stage(
@@ -586,7 +648,7 @@ def run_full_lira_stage(
     print("Running full LiRA attack with reference models...")
 
     teacher = _make_teacher(input_dim, config, feature_metadata)
-    teacher_metadata = _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+    teacher_metadata = _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
 
     if not teacher_metadata:
         print("Error: Teacher checkpoint not found. Train teacher first.")
@@ -641,8 +703,7 @@ def run_student_alpha_sweep(
     from models.student import build_student, train_student
 
     alphas = list(config["student"].get("alpha_sweep", [0.3, 0.5, 0.7]))
-    checkpoint_dir = Path("experiments/checkpoints")
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path(_checkpoint_path(config, "")).parent
     original_alpha = config["student"].get("alpha")
 
     rows = []
