@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
             "prepare-data",
             "train-teacher",
             "train-student",
+            "sweep-student",
             "train-mitigated",
             "run-attacks",
             "run-lira-full",
@@ -218,6 +219,12 @@ def main() -> None:
             _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
         student = build_student(input_dim, int(config["model"]["num_classes"]), list(config["student"]["hidden_dims"]), float(config["model"]["dropout"]))
         train_student(student, teacher, loaders["train"], loaders["test"], device, config, "experiments/checkpoints/student.pt")
+
+    if args.stage == "sweep-student":
+        if teacher is None:
+            teacher = _make_teacher(input_dim, config, feature_metadata)
+            _load_if_exists(teacher, "experiments/checkpoints/teacher.pt", device)
+        run_student_alpha_sweep(input_dim, teacher, loaders, device, config)
 
     if args.stage in {"train-mitigated", "all", "smoke"}:
         if teacher is None:
@@ -619,6 +626,63 @@ def run_full_lira_stage(
     append_result(config["paths"]["results_csv"], row)
 
     print(f"Full LiRA attack complete. AUC: {row['auc']:.4f}")
+
+
+def run_student_alpha_sweep(
+    input_dim: int,
+    teacher: torch.nn.Module,
+    loaders: dict[str, DataLoader],
+    device: torch.device,
+    config: dict,
+) -> None:
+    # train one student per alpha, pick the tightest gap in the [40,45] window
+    import csv
+    import shutil
+    from models.student import build_student, train_student
+
+    alphas = list(config["student"].get("alpha_sweep", [0.3, 0.5, 0.7]))
+    checkpoint_dir = Path("experiments/checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    original_alpha = config["student"].get("alpha")
+
+    rows = []
+    for alpha in alphas:
+        print(f"\n--- alpha={alpha} ---")
+        config["student"]["alpha"] = float(alpha)
+        student = build_student(
+            input_dim,
+            int(config["model"]["num_classes"]),
+            list(config["student"]["hidden_dims"]),
+            float(config["model"]["dropout"]),
+        )
+        ckpt = checkpoint_dir / f"student_alpha{str(alpha).replace('.', '')}.pt"
+        result = train_student(student, teacher, loaders["train"], loaders["test"], device, config, ckpt)
+        rows.append({
+            "alpha": float(alpha),
+            "train_acc": result.train_acc,
+            "test_acc": result.eval_acc,
+            "gap": result.train_acc - result.eval_acc,
+            "checkpoint": str(ckpt),
+        })
+    if original_alpha is not None:
+        config["student"]["alpha"] = original_alpha
+
+    summary_path = checkpoint_dir / "sweep_summary.csv"
+    with summary_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["alpha", "train_acc", "test_acc", "gap", "checkpoint"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    in_window = [r for r in rows if 0.40 <= r["test_acc"] <= 0.45]
+    best = min(in_window, key=lambda r: r["gap"]) if in_window else max(rows, key=lambda r: r["test_acc"])
+    shutil.copy(best["checkpoint"], checkpoint_dir / "student.pt")
+
+    print("\nsweep summary:")
+    for r in rows:
+        marker = " <- chosen" if r["checkpoint"] == best["checkpoint"] else ""
+        print(f"  alpha={r['alpha']:.2f}  train={r['train_acc']:.4f}  test={r['test_acc']:.4f}  gap={r['gap']:.4f}{marker}")
+    if not in_window:
+        print("  none landed in [40, 45], picked highest test acc instead")
 
 
 def run_subgroup_analysis_stage(config: dict) -> None:

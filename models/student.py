@@ -73,9 +73,17 @@ def train_student(
         lr=float(config["model"]["lr"]),
         weight_decay=float(config["model"]["weight_decay"]),
     )
+    scheduler = None
+    scheduler_config = config.get("student", {}).get("scheduler", {})
+    if bool(scheduler_config.get("enabled", False)):
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=int(scheduler_config.get("step_size", 20)),
+            gamma=float(scheduler_config.get("gamma", 0.5)),
+        )
     epochs = int(config["student"]["epochs"])
     temperature = float(config["student"]["temperature"])
-    alpha = float(config["student"]["alpha"])
+    alpha = float(config["student"].get("alpha", 0.5))
     train_loss = train_acc = eval_loss = eval_acc = 0.0
 
     for epoch in range(1, epochs + 1):
@@ -101,10 +109,13 @@ def train_student(
         train_loss = total_loss / max(total, 1)
         train_acc = total_correct / max(total, 1)
         eval_loss, eval_acc = evaluate(model, eval_loader, device)
+        lr = optimizer.param_groups[0]["lr"]
         print(
             f"student epoch={epoch} train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-            f"eval_loss={eval_loss:.4f} eval_acc={eval_acc:.4f}"
+            f"eval_loss={eval_loss:.4f} eval_acc={eval_acc:.4f} gap={train_acc - eval_acc:.4f} lr={lr:.6g}"
         )
+        if scheduler is not None:
+            scheduler.step()
 
     metadata = {
         "epoch": epochs,
