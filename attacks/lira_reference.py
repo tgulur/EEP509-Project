@@ -21,11 +21,13 @@ from torch.utils.data import DataLoader, TensorDataset
 class ReferenceModelCache:
     # membership_masks[i, j] = was sample j in the training subset of reference model i?
     # confidence_matrix[i, j] = model i's logit-space confidence on sample j
+    # correctness_matrix[i, j] = did model i argmax-predict sample j correctly? (for Feldman-Zhang)
     # target_confidences[j]   = the target model's confidence on sample j
     num_models: int
     target_indices: np.ndarray
     membership_masks: np.ndarray = field(default_factory=lambda: np.array([]))
     confidence_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
+    correctness_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
     target_confidences: np.ndarray = field(default_factory=lambda: np.array([]))
 
     def get_confidences_for_sample(self, sample_idx: int) -> tuple[np.ndarray, np.ndarray]:
@@ -35,6 +37,14 @@ class ReferenceModelCache:
         in_mask = self.membership_masks[:, pos]
         confs = self.confidence_matrix[:, pos]
         return confs[in_mask], confs[~in_mask]
+
+    def get_correctness_for_sample(self, sample_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        if sample_idx not in self._idx_to_pos or self.correctness_matrix.size == 0:
+            return np.array([]), np.array([])
+        pos = self._idx_to_pos[sample_idx]
+        in_mask = self.membership_masks[:, pos]
+        correct = self.correctness_matrix[:, pos]
+        return correct[in_mask], correct[~in_mask]
 
     def get_target_confidence(self, sample_idx: int) -> float | None:
         pos = self._idx_to_pos.get(sample_idx)
@@ -69,6 +79,7 @@ class ReferenceModelCache:
                 "target_indices": self.target_indices,
                 "membership_masks": self.membership_masks,
                 "confidence_matrix": self.confidence_matrix,
+                "correctness_matrix": self.correctness_matrix,
                 "target_confidences": self.target_confidences,
             }, f)
 
@@ -81,6 +92,7 @@ class ReferenceModelCache:
             target_indices=data["target_indices"],
             membership_masks=data["membership_masks"],
             confidence_matrix=data["confidence_matrix"],
+            correctness_matrix=data.get("correctness_matrix", np.array([])),
             target_confidences=data.get("target_confidences", np.array([])),
         )
 
@@ -114,8 +126,8 @@ def train_reference_models(
 
     membership_masks = np.zeros((num_models, n_targets), dtype=bool)
     confidence_matrix = np.zeros((num_models, n_targets), dtype=np.float32)
+    correctness_matrix = np.zeros((num_models, n_targets), dtype=np.float32)
 
-    target_set = set(target_indices)
     target_idx_to_pos = {int(idx): pos for pos, idx in enumerate(target_indices)}
 
     print(f"Training {num_models} reference models for LiRA...")
@@ -133,10 +145,11 @@ def train_reference_models(
             device, epochs, batch_size, lr
         )
 
-        confidences = _compute_confidences(
+        confidences, correctness = _compute_confidences_and_correctness(
             model, features, labels, target_indices, device, batch_size
         )
         confidence_matrix[model_idx] = confidences
+        correctness_matrix[model_idx] = correctness
 
         if (model_idx + 1) % 10 == 0 or model_idx == num_models - 1:
             print(f"  Trained {model_idx + 1}/{num_models} reference models")
@@ -146,6 +159,7 @@ def train_reference_models(
         target_indices=target_indices,
         membership_masks=membership_masks,
         confidence_matrix=confidence_matrix,
+        correctness_matrix=correctness_matrix,
     )
 
     if cache_dir is not None:
@@ -218,7 +232,23 @@ def _compute_confidences(
     batch_size: int,
     eps: float = 1e-6,
 ) -> np.ndarray:
-    # logit-space confidence on the true label
+    confidences, _ = _compute_confidences_and_correctness(
+        model, features, labels, indices, device, batch_size, eps
+    )
+    return confidences
+
+
+@torch.no_grad()
+def _compute_confidences_and_correctness(
+    model: nn.Module,
+    features: np.ndarray,
+    labels: np.ndarray,
+    indices: np.ndarray,
+    device: torch.device,
+    batch_size: int,
+    eps: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray]:
+    # logit-space confidence on true label, plus 0/1 correctness of argmax prediction
     model.to(device)
     model.eval()
 
@@ -228,12 +258,14 @@ def _compute_confidences(
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     confidences = []
+    correctness = []
     for batch_features, batch_labels in loader:
         batch_features = batch_features.to(device)
         batch_labels = batch_labels.to(device)
-        probs = torch.softmax(model(batch_features), dim=1)
+        logits = model(batch_features)
+        probs = torch.softmax(logits, dim=1)
         conf = probs.gather(1, batch_labels.view(-1, 1)).squeeze(1)
-        conf = torch.logit(conf.clamp(eps, 1.0 - eps))
-        confidences.append(conf.cpu().numpy())
+        confidences.append(torch.logit(conf.clamp(eps, 1.0 - eps)).cpu().numpy())
+        correctness.append((logits.argmax(dim=1) == batch_labels).float().cpu().numpy())
 
-    return np.concatenate(confidences)
+    return np.concatenate(confidences), np.concatenate(correctness)

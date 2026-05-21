@@ -746,6 +746,27 @@ def run_student_alpha_sweep(
         print("  none landed in [40, 45], picked highest test acc instead")
 
 
+def _load_memorization_scores_if_available(config: dict) -> dict[int, float] | None:
+    # F/Z scores ride off the LiRA reference cache. if the cache isn't there or
+    # is from a pre-correctness-matrix run, just skip the stratification.
+    from attacks.lira_reference import ReferenceModelCache
+
+    cache_dir = Path(config.get("lira_full", {}).get("cache_dir", "experiments/lira_cache"))
+    candidates = sorted(cache_dir.glob("lira_cache_*.pkl"))
+    if not candidates:
+        return None
+    try:
+        from analysis.memorization import compute_feldman_zhang_scores
+
+        cache = ReferenceModelCache.load(candidates[-1])
+        scores = compute_feldman_zhang_scores(cache)
+        print(f"loaded {len(scores)} Feldman-Zhang memorization scores from {candidates[-1].name}")
+        return scores
+    except (ValueError, KeyError) as e:
+        print(f"skipping memorization stratification: {e}")
+        return None
+
+
 def run_subgroup_analysis_stage(config: dict) -> None:
     """Run subgroup vulnerability analysis and generate plots."""
     import pandas as pd
@@ -770,7 +791,8 @@ def run_subgroup_analysis_stage(config: dict) -> None:
         print("Run 'run-attacks' first to generate attack scores.")
         return
 
-    outputs = run_subgroup_analysis(scores_df, class_counts_df, analysis_dir)
+    memorization_scores = _load_memorization_scores_if_available(config)
+    outputs = run_subgroup_analysis(scores_df, class_counts_df, analysis_dir, memorization_scores)
     print(f"Generated {len(outputs)} subgroup analysis files")
 
     summary_path = analysis_dir / "subgroup_summary.csv"

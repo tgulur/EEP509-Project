@@ -71,6 +71,38 @@ def stratify_by_confidence(
     return {label: scores_df[scores_df["conf_bin"] == label] for label in labels}
 
 
+def stratify_by_memorization(
+    scores_df: pd.DataFrame,
+    memorization_scores: dict[int, float],
+    bins: tuple[float, ...] = (-1.0, 0.0, 0.1, 0.3, 1.0),
+    labels: tuple[str, ...] = ("mem_neg_or_zero", "mem_low", "mem_med", "mem_high"),
+) -> dict[str, pd.DataFrame]:
+    """Bin by Feldman-Zhang memorization intensity. See analysis/memorization.py
+    for the definition and the rationale.
+
+    Fixed thresholds rather than quantiles: F/Z scores cluster heavily at zero
+    (most samples aren't memorized), so quartile boundaries collapse and leave
+    the actually-memorized samples in the same bin as everything else. With
+    (-1, 0, 0.1, 0.3, 1] the mem_high bin picks out the long-tail samples we
+    care about - in our run, ~200 of 100k samples land there."""
+    if "sample_idx" not in scores_df.columns:
+        raise ValueError("scores_df must have 'sample_idx' column for memorization stratification")
+
+    scores_df = scores_df.copy()
+    scores_df["memorization"] = scores_df["sample_idx"].map(memorization_scores)
+    available = scores_df.dropna(subset=["memorization"]).copy()
+    if available.empty:
+        return {label: available.iloc[:0] for label in labels}
+
+    available["mem_bin"] = pd.cut(
+        available["memorization"],
+        bins=bins,
+        labels=labels,
+        include_lowest=True,
+    )
+    return {label: available[available["mem_bin"] == label].dropna(subset=["mem_bin"]) for label in labels}
+
+
 def stratify_by_loss_quantile(
     scores_df: pd.DataFrame,
     quantiles: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
@@ -151,6 +183,7 @@ def run_subgroup_analysis(
     scores_df: pd.DataFrame,
     class_counts_df: pd.DataFrame,
     output_dir: Path,
+    memorization_scores: dict[int, float] | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
@@ -193,6 +226,16 @@ def run_subgroup_analysis(
         loss_path = output_dir / f"subgroup_loss_{prefix}.csv"
         loss_metrics.to_csv(loss_path, index=False)
         outputs[f"loss_{prefix}"] = loss_path
+
+        if memorization_scores:
+            mem_subgroups = stratify_by_memorization(group, memorization_scores)
+            mem_metrics = compute_subgroup_metrics(mem_subgroups)
+            mem_metrics["model_type"] = model_type
+            mem_metrics["attack_type"] = attack_type
+            mem_metrics["stratification"] = "memorization"
+            mem_path = output_dir / f"subgroup_mem_{prefix}.csv"
+            mem_metrics.to_csv(mem_path, index=False)
+            outputs[f"mem_{prefix}"] = mem_path
 
     combined = _combine_all_subgroup_results(output_dir)
     if combined is not None:
