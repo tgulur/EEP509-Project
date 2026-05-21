@@ -186,6 +186,12 @@ def run_subgroup_analysis(
     memorization_scores: dict[int, float] | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    # wipe stale per-bin CSVs from earlier runs (the file-naming scheme changed
+    # when we added mitigation to the grouping, and old files would otherwise
+    # get pulled back into the combined summary with empty mitigation cells).
+    for stale in output_dir.glob("subgroup_*.csv"):
+        if stale.name != "subgroup_summary.csv":
+            stale.unlink()
     outputs = {}
 
     required_cols = {"label", "confidence", "loss"}
@@ -197,45 +203,38 @@ def run_subgroup_analysis(
               "Re-run attacks to generate scores with metadata.")
         return outputs
 
-    for (model_type, attack_type), group in scores_df.groupby(["model_type", "attack_type"]):
-        prefix = f"{model_type}_{attack_type}"
+    group_keys = ["model_type", "attack_type"]
+    if "mitigation" in scores_df.columns:
+        group_keys.append("mitigation")
 
-        freq_subgroups = stratify_by_class_frequency(group, class_counts_df)
-        freq_metrics = compute_subgroup_metrics(freq_subgroups)
-        freq_metrics["model_type"] = model_type
-        freq_metrics["attack_type"] = attack_type
-        freq_metrics["stratification"] = "class_frequency"
-        freq_path = output_dir / f"subgroup_freq_{prefix}.csv"
-        freq_metrics.to_csv(freq_path, index=False)
-        outputs[f"freq_{prefix}"] = freq_path
+    for keys, group in scores_df.groupby(group_keys):
+        if len(group_keys) == 3:
+            model_type, attack_type, mitigation = keys
+        else:
+            model_type, attack_type = keys
+            mitigation = "none"
+        prefix = f"{model_type}_{mitigation}_{attack_type}"
 
-        conf_subgroups = stratify_by_confidence(group)
-        conf_metrics = compute_subgroup_metrics(conf_subgroups)
-        conf_metrics["model_type"] = model_type
-        conf_metrics["attack_type"] = attack_type
-        conf_metrics["stratification"] = "confidence"
-        conf_path = output_dir / f"subgroup_conf_{prefix}.csv"
-        conf_metrics.to_csv(conf_path, index=False)
-        outputs[f"conf_{prefix}"] = conf_path
-
-        loss_subgroups = stratify_by_loss_quantile(group)
-        loss_metrics = compute_subgroup_metrics(loss_subgroups)
-        loss_metrics["model_type"] = model_type
-        loss_metrics["attack_type"] = attack_type
-        loss_metrics["stratification"] = "loss_quantile"
-        loss_path = output_dir / f"subgroup_loss_{prefix}.csv"
-        loss_metrics.to_csv(loss_path, index=False)
-        outputs[f"loss_{prefix}"] = loss_path
-
+        stratifiers = [
+            ("class_frequency", "freq", lambda g: stratify_by_class_frequency(g, class_counts_df)),
+            ("confidence", "conf", stratify_by_confidence),
+            ("loss_quantile", "loss", stratify_by_loss_quantile),
+        ]
         if memorization_scores:
-            mem_subgroups = stratify_by_memorization(group, memorization_scores)
-            mem_metrics = compute_subgroup_metrics(mem_subgroups)
-            mem_metrics["model_type"] = model_type
-            mem_metrics["attack_type"] = attack_type
-            mem_metrics["stratification"] = "memorization"
-            mem_path = output_dir / f"subgroup_mem_{prefix}.csv"
-            mem_metrics.to_csv(mem_path, index=False)
-            outputs[f"mem_{prefix}"] = mem_path
+            stratifiers.append(
+                ("memorization", "mem", lambda g: stratify_by_memorization(g, memorization_scores))
+            )
+
+        for strat_name, file_tag, strat_fn in stratifiers:
+            subgroups = strat_fn(group)
+            metrics = compute_subgroup_metrics(subgroups)
+            metrics["model_type"] = model_type
+            metrics["attack_type"] = attack_type
+            metrics["mitigation"] = mitigation
+            metrics["stratification"] = strat_name
+            path = output_dir / f"subgroup_{file_tag}_{prefix}.csv"
+            metrics.to_csv(path, index=False)
+            outputs[f"{file_tag}_{prefix}"] = path
 
     combined = _combine_all_subgroup_results(output_dir)
     if combined is not None:

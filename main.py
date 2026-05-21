@@ -801,6 +801,7 @@ def run_subgroup_analysis_stage(config: dict) -> None:
         analysis_dir / "class_distribution.csv",
         summary_path,
         figure_dir,
+        results_csv=config["paths"]["results_csv"],
     )
     print(f"Subgroup plots saved to {figure_dir}")
 

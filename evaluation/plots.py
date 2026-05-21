@@ -53,6 +53,136 @@ def _plot_privacy_utility_by_attack(frame: pd.DataFrame, output: Path) -> None:
         )
 
 
+def _join_worst_case(
+    results_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    stratification: str,
+    worst_subgroup: str,
+) -> pd.DataFrame:
+    """For each row in results.csv, look up the AUC and TPR@1%FPR of the worst-
+    case bin in subgroup_summary.csv. Rows without a subgroup match are dropped."""
+    sg = summary_df[
+        (summary_df["stratification"] == stratification)
+        & (summary_df["subgroup"] == worst_subgroup)
+    ]
+    keys = ["model_type", "attack_type"]
+    if "mitigation" in sg.columns and "mitigation" in results_df.columns:
+        keys.append("mitigation")
+    sg_cols = keys + ["auc"]
+    rename = {"auc": "auc_worst"}
+    if "tpr_at_0.01_fpr" in sg.columns:
+        sg_cols.append("tpr_at_0.01_fpr")
+        rename["tpr_at_0.01_fpr"] = "tpr_worst"
+    merged = results_df.merge(sg[sg_cols].rename(columns=rename), on=keys, how="inner")
+    return merged.dropna(subset=["test_acc", "auc_worst"])
+
+
+# marker per model variant - keeps panels readable without per-point labels.
+# teacher is a star to stand out, students get distinct shapes by mitigation.
+_MARKERS = {
+    "teacher/none": ("*", 220),
+    "student/none": ("o", 70),
+    "student/bottleneck": ("s", 60),
+    "student/nonorm": ("^", 70),
+    "student/confidence_filter": ("D", 55),
+}
+
+
+def _plot_privacy_utility_comparison(
+    results_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    output: Path,
+) -> None:
+    """2x3 figure: rows = {AUC, TPR @ 1% FPR}, columns = {population, loss-q4, mem_high}.
+
+    The visual disparate-impact argument: each column shows the same models /
+    attacks, but with a more aggressive measurement going right. The TPR row
+    is the one that matters most for the F/Z column - the loss-based attack's
+    AUC can look misleadingly low on memorized samples because the student's
+    loss on those samples isn't well-ordered, but TPR @ 1% FPR still catches
+    the small fraction that *are* memorized by the student."""
+
+    # Shadow attack is in the data but excluded from this figure: our shadow
+    # implementation sits near 0.5 AUC across the board (it does not train
+    # full shadow-model attacks the way Shokri 2017 prescribes - it is closer
+    # to a baseline check). Including it adds two cluttered points per panel
+    # without adding storytelling value. Re-enable by removing the line below.
+    results_df = results_df[results_df["attack_type"] != "shadow"].copy()
+    summary_df = summary_df[summary_df["attack_type"] != "shadow"].copy()
+
+    has_mem = ((summary_df["stratification"] == "memorization")
+               & (summary_df["subgroup"] == "mem_high")).any()
+    n_cols = 3 if has_mem else 2
+
+    fig, axes = plt.subplots(2, n_cols, figsize=(5.5 * n_cols, 8.2), sharex=True)
+
+    pop = results_df.dropna(subset=["test_acc", "auc"])
+    loss_q4 = _join_worst_case(results_df, summary_df, "loss_quantile", "loss_q4_high")
+    mem_high = _join_worst_case(results_df, summary_df, "memorization", "mem_high") if has_mem else None
+
+    # row 0: AUC
+    _draw_pu_panel(axes[0, 0], pop, y_col="auc", title="Population")
+    _draw_pu_panel(axes[0, 1], loss_q4, y_col="auc_worst", title="Loss-q4 worst-case")
+    if has_mem:
+        _draw_pu_panel(axes[0, 2], mem_high, y_col="auc_worst", title="F/Z mem_high worst-case")
+
+    # row 1: TPR @ 1% FPR
+    _draw_pu_panel(axes[1, 0], pop, y_col="tpr_at_1fpr", title=None)
+    _draw_pu_panel(axes[1, 1], loss_q4, y_col="tpr_worst", title=None)
+    if has_mem:
+        _draw_pu_panel(axes[1, 2], mem_high, y_col="tpr_worst", title=None)
+
+    for ax in axes[0]:
+        ax.axhline(0.5, color="gray", linestyle="--", alpha=0.4, linewidth=0.8)
+    for ax in axes[1]:
+        ax.axhline(0.01, color="gray", linestyle="--", alpha=0.4, linewidth=0.8)
+    for ax in axes[1]:
+        ax.set_xlabel("Test accuracy")
+    axes[0, 0].set_ylabel("MIA AUC")
+    axes[1, 0].set_ylabel("TPR @ 1% FPR")
+
+    # single legend at the bottom - attack color + model/mitigation shape
+    attack_handles, attack_labels = axes[0, 0].get_legend_handles_labels()
+    shape_handles = [
+        plt.Line2D([0], [0], marker=m, color="black", linestyle="", markersize=8 if m == "*" else 6, label=k)
+        for k, (m, _) in _MARKERS.items()
+    ]
+    fig.legend(
+        attack_handles + shape_handles,
+        attack_labels + [h.get_label() for h in shape_handles],
+        loc="lower center",
+        ncol=min(6, len(attack_handles) + len(shape_handles)),
+        bbox_to_anchor=(0.5, -0.02),
+        fontsize=9,
+    )
+    plt.tight_layout(rect=(0, 0.06, 1, 1))
+    _save_current(output / "privacy_utility_comparison")
+
+
+def _draw_pu_panel(ax, frame: pd.DataFrame, y_col: str, title: str | None) -> None:
+    if frame.empty:
+        if title is not None:
+            ax.set_title(f"{title}\n(no data)")
+        return
+    for attack_type, group in frame.groupby("attack_type"):
+        for _, row in group.iterrows():
+            key = f"{row['model_type']}/{row.get('mitigation', 'none')}"
+            marker, size = _MARKERS.get(key, ("o", 50))
+            ax.scatter(
+                row["test_acc"], row[y_col],
+                marker=marker, s=size, alpha=0.85,
+                label=attack_type if _first_use(ax, attack_type) else None,
+            )
+    if title is not None:
+        ax.set_title(title)
+    ax.set_ylim(0.0, 1.0)
+
+
+def _first_use(ax, label: str) -> bool:
+    existing = {t.get_label() for t in ax.collections}
+    return label not in existing
+
+
 def _scatter_privacy_utility(frame: pd.DataFrame, stem: Path, group_by: str, title: str) -> None:
     plt.figure(figsize=(6, 4))
     for name, group in frame.groupby(group_by):
@@ -229,6 +359,7 @@ def make_subgroup_plots(
     class_dist_csv: str | Path,
     subgroup_summary_csv: str | Path,
     output_dir: str | Path,
+    results_csv: str | Path | None = None,
 ) -> None:
     scores_path = Path(scores_csv)
     class_dist_path = Path(class_dist_csv)
@@ -245,8 +376,16 @@ def make_subgroup_plots(
 
     if summary_path.exists():
         summary_df = pd.read_csv(summary_path)
-        for strat in ["class_frequency", "confidence", "loss_quantile"]:
+        for strat in ["class_frequency", "confidence", "loss_quantile", "memorization"]:
             plot_subgroup_heatmap(summary_df, output, stratification=strat)
+        if results_csv is not None:
+            results_path = Path(results_csv)
+            if results_path.exists():
+                results_df = pd.read_csv(results_path)
+                for col in ["auc", "test_acc"]:
+                    if col in results_df.columns:
+                        results_df[col] = pd.to_numeric(results_df[col], errors="coerce")
+                _plot_privacy_utility_comparison(results_df, summary_df, output)
 
     if class_counts_df is not None and "label" in scores_df.columns:
         plot_vulnerability_by_class_frequency(scores_df, class_counts_df, output)
