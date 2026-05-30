@@ -80,11 +80,17 @@ def _join_worst_case(
 # marker per model variant - keeps panels readable without per-point labels.
 # teacher is a star to stand out, students get distinct shapes by mitigation.
 _MARKERS = {
-    "teacher/none": ("*", 220),
-    "student/none": ("o", 70),
-    "student/bottleneck": ("s", 60),
-    "student/nonorm": ("^", 70),
-    "student/confidence_filter": ("D", 55),
+    "teacher/none": ("*", 280),
+    "student/none": ("o", 90),
+    "student/bottleneck": ("s", 80),
+    "student/nonorm": ("^", 90),
+    "student/confidence_filter": ("D", 75),
+}
+
+_ATTACK_COLORS = {
+    "loss_based": "#d62728",
+    "lira": "#1f77b4",
+    "lira_full": "#7f7f7f",
 }
 
 
@@ -114,7 +120,7 @@ def _plot_privacy_utility_comparison(
                & (summary_df["subgroup"] == "mem_high")).any()
     n_cols = 3 if has_mem else 2
 
-    fig, axes = plt.subplots(2, n_cols, figsize=(5.5 * n_cols, 8.2), sharex=True)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5.0 * n_cols, 6.8), sharex=True)
 
     pop = results_df.dropna(subset=["test_acc", "auc"])
     loss_q4 = _join_worst_case(results_df, summary_df, "loss_quantile", "loss_q4_high")
@@ -132,30 +138,59 @@ def _plot_privacy_utility_comparison(
     if has_mem:
         _draw_pu_panel(axes[1, 2], mem_high, y_col="tpr_worst", title=None)
 
+    # gray dashed reference lines: AUC = 0.5 (random guessing) on top row, TPR = 1% (FPR
+     # baseline) on bottom row. Labels live in the caption, not on the panel, so they
+     # don't collide with data markers.
     for ax in axes[0]:
-        ax.axhline(0.5, color="gray", linestyle="--", alpha=0.4, linewidth=0.8)
+        ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, linewidth=0.9)
     for ax in axes[1]:
-        ax.axhline(0.01, color="gray", linestyle="--", alpha=0.4, linewidth=0.8)
+        ax.axhline(0.01, color="gray", linestyle="--", alpha=0.5, linewidth=0.9)
     for ax in axes[1]:
-        ax.set_xlabel("Test accuracy")
-    axes[0, 0].set_ylabel("MIA AUC")
-    axes[1, 0].set_ylabel("TPR @ 1% FPR")
+        ax.set_xlabel("Test accuracy", fontsize=12)
+    axes[0, 0].set_ylabel("MIA AUC", fontsize=12)
+    axes[1, 0].set_ylabel("TPR @ 1% FPR", fontsize=12)
+    for row in axes:
+        for ax in row:
+            ax.tick_params(labelsize=10)
+    for ax in axes[0]:
+        title = ax.get_title()
+        if title:
+            ax.set_title(title, fontsize=13, fontweight="bold")
 
-    # single legend at the bottom - attack color + model/mitigation shape
-    attack_handles, attack_labels = axes[0, 0].get_legend_handles_labels()
+    attack_handles = [
+        plt.Line2D([0], [0], marker="o", color=color, linestyle="",
+                   markersize=9, markeredgecolor="black", markeredgewidth=0.7, label=name)
+        for name, color in _ATTACK_COLORS.items()
+        if (results_df["attack_type"] == name).any()
+    ]
     shape_handles = [
-        plt.Line2D([0], [0], marker=m, color="black", linestyle="", markersize=8 if m == "*" else 6, label=k)
+        plt.Line2D([0], [0], marker=m, color="dimgray", linestyle="",
+                   markersize=10 if m == "*" else 8,
+                   markeredgecolor="black", markeredgewidth=0.5, label=k)
         for k, (m, _) in _MARKERS.items()
     ]
-    fig.legend(
-        attack_handles + shape_handles,
-        attack_labels + [h.get_label() for h in shape_handles],
+    legend_attacks = fig.legend(
+        handles=attack_handles,
         loc="lower center",
-        ncol=min(6, len(attack_handles) + len(shape_handles)),
-        bbox_to_anchor=(0.5, -0.02),
-        fontsize=9,
+        ncol=len(attack_handles),
+        bbox_to_anchor=(0.5, 0.13),
+        fontsize=11,
+        title="Attack",
+        title_fontsize=11,
+        frameon=False,
     )
-    plt.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.add_artist(legend_attacks)
+    fig.legend(
+        handles=shape_handles,
+        loc="lower center",
+        ncol=min(5, len(shape_handles)),
+        bbox_to_anchor=(0.5, 0.01),
+        fontsize=11,
+        title="Model / mitigation",
+        title_fontsize=11,
+        frameon=False,
+    )
+    plt.tight_layout(rect=(0, 0.22, 1, 1))
     _save_current(output / "privacy_utility_comparison")
 
 
@@ -165,12 +200,14 @@ def _draw_pu_panel(ax, frame: pd.DataFrame, y_col: str, title: str | None) -> No
             ax.set_title(f"{title}\n(no data)")
         return
     for attack_type, group in frame.groupby("attack_type"):
+        color = _ATTACK_COLORS.get(attack_type, "gray")
         for _, row in group.iterrows():
             key = f"{row['model_type']}/{row.get('mitigation', 'none')}"
-            marker, size = _MARKERS.get(key, ("o", 50))
+            marker, size = _MARKERS.get(key, ("o", 60))
             ax.scatter(
                 row["test_acc"], row[y_col],
-                marker=marker, s=size, alpha=0.85,
+                marker=marker, s=size, alpha=0.9,
+                color=color, edgecolor="black", linewidth=0.6,
                 label=attack_type if _first_use(ax, attack_type) else None,
             )
     if title is not None:

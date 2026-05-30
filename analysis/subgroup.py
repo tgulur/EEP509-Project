@@ -137,21 +137,71 @@ def tpr_at_fpr(y_true: np.ndarray, scores: np.ndarray, target_fpr: float) -> flo
     return float(tpr[idx])
 
 
+def stratified_bootstrap_ci(
+    y_true: np.ndarray,
+    scores: np.ndarray,
+    metric_fn,
+    n_bootstrap: int = 1000,
+    alpha: float = 0.05,
+    seed: int = 509,
+) -> tuple[float, float]:
+    """95% percentile CI under a stratified bootstrap. Members and non-members are
+    resampled separately, preserving the class balance of the subgroup. At small N
+    the resampling distribution is discrete and the CI will be wide and asymmetric;
+    that is the honest reflection of what the data supports."""
+    rng = np.random.default_rng(seed)
+    members = np.where(y_true == 1)[0]
+    non_members = np.where(y_true == 0)[0]
+    if len(members) < 2 or len(non_members) < 2:
+        return (float("nan"), float("nan"))
+
+    samples = np.empty(n_bootstrap)
+    for b in range(n_bootstrap):
+        m_idx = rng.choice(members, size=len(members), replace=True)
+        n_idx = rng.choice(non_members, size=len(non_members), replace=True)
+        idx = np.concatenate([m_idx, n_idx])
+        try:
+            samples[b] = metric_fn(y_true[idx], scores[idx])
+        except Exception:
+            samples[b] = np.nan
+
+    valid = samples[~np.isnan(samples)]
+    if len(valid) < n_bootstrap // 2:
+        return (float("nan"), float("nan"))
+    return (
+        float(np.quantile(valid, alpha / 2)),
+        float(np.quantile(valid, 1 - alpha / 2)),
+    )
+
+
 def compute_subgroup_metrics(
     subgroups: dict[str, pd.DataFrame],
     fpr_targets: tuple[float, ...] = (0.001, 0.01),
+    bootstrap: bool = False,
+    n_bootstrap: int = 1000,
 ) -> pd.DataFrame:
-    """AUC + TPR@FPR per subgroup. NaN when the subgroup has only one membership class."""
+    """AUC + TPR@FPR per subgroup. NaN when the subgroup has only one membership class.
+
+    When bootstrap=True, also emits {metric}_lo / {metric}_hi columns with the 95%
+    percentile CI from a stratified bootstrap. Cost is O(B * subgroup_size) per
+    metric, which is cheap even at B=1000 because subgroup ROC sorts are fast."""
     rows = []
     for name, df in subgroups.items():
         if df.empty or df["is_member"].nunique() < 2:
-            rows.append({
+            empty_row = {
                 "subgroup": name,
                 "n_samples": len(df),
                 "n_members": int(df["is_member"].sum()) if not df.empty else 0,
                 "auc": np.nan,
                 **{f"tpr_at_{fpr}_fpr": np.nan for fpr in fpr_targets},
-            })
+            }
+            if bootstrap:
+                empty_row["auc_lo"] = np.nan
+                empty_row["auc_hi"] = np.nan
+                for fpr in fpr_targets:
+                    empty_row[f"tpr_at_{fpr}_fpr_lo"] = np.nan
+                    empty_row[f"tpr_at_{fpr}_fpr_hi"] = np.nan
+            rows.append(empty_row)
             continue
 
         y_true = df["is_member"].values
@@ -174,6 +224,22 @@ def compute_subgroup_metrics(
             except Exception:
                 row[f"tpr_at_{fpr}_fpr"] = np.nan
 
+        if bootstrap:
+            auc_lo, auc_hi = stratified_bootstrap_ci(
+                y_true, scores, roc_auc_score, n_bootstrap=n_bootstrap
+            )
+            row["auc_lo"] = auc_lo
+            row["auc_hi"] = auc_hi
+            for fpr in fpr_targets:
+                lo, hi = stratified_bootstrap_ci(
+                    y_true,
+                    scores,
+                    lambda yt, sc, f=fpr: tpr_at_fpr(yt, sc, f),
+                    n_bootstrap=n_bootstrap,
+                )
+                row[f"tpr_at_{fpr}_fpr_lo"] = lo
+                row[f"tpr_at_{fpr}_fpr_hi"] = hi
+
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -187,7 +253,7 @@ def run_subgroup_analysis(
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     # wipe stale per-bin CSVs from earlier runs (the file-naming scheme changed
-    # when we added mitigation to the grouping, and old files would otherwise
+    # when I added mitigation to the grouping, and old files would otherwise
     # get pulled back into the combined summary with empty mitigation cells).
     for stale in output_dir.glob("subgroup_*.csv"):
         if stale.name != "subgroup_summary.csv":
