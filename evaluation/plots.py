@@ -89,7 +89,7 @@ _MARKERS = {
 
 _ATTACK_COLORS = {
     "loss_based": "#d62728",
-    "lira": "#1f77b4",
+    "pooled_lr": "#1f77b4",
     "lira_full": "#7f7f7f",
 }
 

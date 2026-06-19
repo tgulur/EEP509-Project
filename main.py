@@ -70,8 +70,8 @@ def setup_run_paths(config: dict, run_id: str) -> None:
     config["paths"]["figure_dir"] = str(run_dir / "figures")
     config["paths"]["results_csv"] = str(run_dir / "results.csv")
 
-    if "lira_full" in config:
-        config["lira_full"]["cache_dir"] = str(run_dir / "lira_cache")
+    if "attacks" in config and "lira_full" in config["attacks"]:
+        config["attacks"]["lira_full"]["cache_dir"] = str(run_dir / "lira_cache")
 
     config["run_id"] = run_id
     print(f"Experiment run: {run_id}")
@@ -227,14 +227,22 @@ def main() -> None:
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
             _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
-        student = build_student(input_dim, int(config["model"]["num_classes"]), list(config["student"]["hidden_dims"]), float(config["model"]["dropout"]))
+        student = build_student(
+            input_dim,
+            int(config["model"]["num_classes"]),
+            list(config["student"]["hidden_dims"]),
+            float(config["model"]["dropout"]),
+            teacher_type=str(config["model"].get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(config["model"].get("embedding_dim", 16)),
+        )
         train_student(student, teacher, loaders["train"], loaders["test"], device, config, _checkpoint_path(config, "student.pt"))
 
     if args.stage == "sweep-student":
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
             _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
-        run_student_alpha_sweep(input_dim, teacher, loaders, device, config)
+        run_student_alpha_sweep(input_dim, teacher, loaders, device, config, feature_metadata)
 
     if args.stage in {"train-mitigated", "all", "smoke"}:
         if teacher is None:
@@ -254,7 +262,7 @@ def main() -> None:
             )
         print("\n--- Training mitigated student: confidence_filter ---")
         _train_confidence_filtered_student(
-            input_dim, teacher, features, labels, splits, loaders, device, config
+            input_dim, teacher, features, labels, splits, loaders, device, config, feature_metadata
         )
 
     if args.stage in {"run-attacks", "all", "smoke"}:
@@ -387,6 +395,7 @@ def _train_confidence_filtered_student(
     loaders: dict[str, DataLoader],
     device: torch.device,
     config: dict,
+    feature_metadata: dict[str, object] | None = None,
 ) -> None:
     # data-side mitigation: drop the top-N% teacher-confidence samples before distilling
     from data_utils.texas100x import Texas100XDataset
@@ -406,6 +415,9 @@ def _train_confidence_filtered_student(
         int(config["model"]["num_classes"]),
         list(config["student"]["hidden_dims"]),
         float(config["model"]["dropout"]),
+        teacher_type=str(config["model"].get("teacher_type", "mlp")),
+        metadata=feature_metadata,
+        embedding_dim=int(config["model"].get("embedding_dim", 16)),
     )
     train_student(student, teacher, train_loader, loaders["test"], device, config,
                   _checkpoint_path(config, "student_confidence_filter.pt"))
@@ -495,7 +507,7 @@ def run_attacks(
     mitigation: str,
     utility_metadata: dict[str, object] | None = None,
 ) -> None:
-    from attacks.lira import LiRAAttack
+    from attacks.pooled_lr import PooledLRAttack
     from attacks.loss_based import LossBasedAttack
     from attacks.shadow import ShadowModelAttack
     from evaluation.metrics import append_result, attack_metrics
@@ -503,7 +515,7 @@ def run_attacks(
     attacks = {
         "loss_based": LossBasedAttack(device),
         "shadow": ShadowModelAttack(device),
-        "lira": LiRAAttack(device),
+        "pooled_lr": PooledLRAttack(device),
     }
     y_true = np.concatenate([
         np.ones(len(member_loader.dataset), dtype=np.int64),
@@ -603,7 +615,7 @@ def run_attack_suite(
         ("confidence_filter", "student_confidence_filter.pt"),
     ]
     for mitigation, ckpt_name in student_variants:
-        model = _build_student_for_mitigation(mitigation, input_dim, config)
+        model = _build_student_for_mitigation(mitigation, input_dim, config, feature_metadata)
         md = _load_if_exists(model, _checkpoint_path(config, ckpt_name), device)
         if not md:
             continue
@@ -619,7 +631,12 @@ def run_attack_suite(
         )
 
 
-def _build_student_for_mitigation(name: str, input_dim: int, config: dict) -> torch.nn.Module:
+def _build_student_for_mitigation(
+    name: str,
+    input_dim: int,
+    config: dict,
+    feature_metadata: dict[str, object] | None = None,
+) -> torch.nn.Module:
     from models.student import build_student
 
     if name in ("none", "confidence_filter"):
@@ -628,6 +645,9 @@ def _build_student_for_mitigation(name: str, input_dim: int, config: dict) -> to
             int(config["model"]["num_classes"]),
             list(config["student"]["hidden_dims"]),
             float(config["model"]["dropout"]),
+            teacher_type=str(config["model"].get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(config["model"].get("embedding_dim", 16)),
         )
     return _build_mitigated_models(input_dim, config)[name]
 
@@ -655,7 +675,8 @@ def run_full_lira_stage(
         return
 
     target_indices = np.concatenate([splits.train, splits.test])
-    lira_config = config.get("lira_full", config.get("lira", {}))
+    attacks_config = config.get("attacks", {})
+    lira_config = attacks_config.get("lira_full", attacks_config.get("lira", {}))
     cache_dir = Path(lira_config.get("cache_dir", "experiments/lira_cache"))
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -666,7 +687,7 @@ def run_full_lira_stage(
         member_indices=splits.train,
         target_model=teacher,
         device=device,
-        config={"lira": lira_config, "model": config["model"]},
+        config={"lira": lira_config, "model": config["model"], "_feature_metadata": feature_metadata},
         cache_dir=cache_dir,
     )
 
@@ -696,6 +717,7 @@ def run_student_alpha_sweep(
     loaders: dict[str, DataLoader],
     device: torch.device,
     config: dict,
+    feature_metadata: dict[str, object] | None = None,
 ) -> None:
     # train one student per alpha, pick the tightest gap in the [40,45] window
     import csv
@@ -715,6 +737,9 @@ def run_student_alpha_sweep(
             int(config["model"]["num_classes"]),
             list(config["student"]["hidden_dims"]),
             float(config["model"]["dropout"]),
+            teacher_type=str(config["model"].get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(config["model"].get("embedding_dim", 16)),
         )
         ckpt = checkpoint_dir / f"student_alpha{str(alpha).replace('.', '')}.pt"
         result = train_student(student, teacher, loaders["train"], loaders["test"], device, config, ckpt)
@@ -751,7 +776,7 @@ def _load_memorization_scores_if_available(config: dict) -> dict[int, float] | N
     # is from a pre-correctness-matrix run, just skip the stratification.
     from attacks.lira_reference import ReferenceModelCache
 
-    cache_dir = Path(config.get("lira_full", {}).get("cache_dir", "experiments/lira_cache"))
+    cache_dir = Path(config.get("attacks", {}).get("lira_full", {}).get("cache_dir", "experiments/lira_cache"))
     candidates = sorted(cache_dir.glob("lira_cache_*.pkl"))
     if not candidates:
         return None

@@ -1,7 +1,11 @@
-"""LiRA-style likelihood-ratio membership scoring.
+"""Pooled likelihood-ratio attack on logit-transformed target confidences.
 
-NOTE: This is a simplified/approximate version. Full LiRA (Carlini et al. 2022)
-requires training many reference models - see lira_full.py for that.
+Fits one in-set Gaussian and one out-of-set Gaussian over the target model's
+true-label confidences, then scores each sample by the log-likelihood ratio.
+Not the per-example LiRA of Carlini et al. 2022 (that's lira_full.py) - this
+is closer to a calibrated Yeom variant, sometimes called a global LR attack.
+Kept around because it's cheap and outperforms the full LiRA whenever the
+reference cache is too small for stable per-sample Gaussian fits.
 """
 
 from __future__ import annotations
@@ -13,8 +17,8 @@ from torch.utils.data import DataLoader
 from attacks.base import MIAttack
 
 
-class LiRAAttack(MIAttack):
-    """Approximate LiRA - fits Gaussians on target model confidence directly."""
+class PooledLRAttack(MIAttack):
+    """Pooled LR attack. Two Gaussians (in/out) on logit-transformed confidences."""
 
     def __init__(self, device: torch.device | str = "cpu", eps: float = 1e-6) -> None:
         self.device = torch.device(device)
@@ -30,7 +34,7 @@ class LiRAAttack(MIAttack):
         model: torch.nn.Module,
         member_loader: DataLoader,
         non_member_loader: DataLoader,
-    ) -> "LiRAAttack":
+    ) -> "PooledLRAttack":
         member_conf = self._true_label_confidence(model, member_loader)
         non_member_conf = self._true_label_confidence(model, non_member_loader)
         self.member_mean = float(member_conf.mean())
