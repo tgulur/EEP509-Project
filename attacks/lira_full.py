@@ -141,17 +141,26 @@ def run_full_lira(
     from attacks.lira_reference import train_reference_models
 
     lira_config = config.get("lira", {})
+    model_cfg = config.get("model", {})
+    # default reference hidden_dims to the teacher's; reference models should be
+    # architectural twins of the target unless explicitly overridden.
+    ref_hidden_dims = list(lira_config.get(
+        "reference_model_hidden_dims",
+        model_cfg.get("hidden_dims", [128, 64]),
+    ))
     cache = train_reference_models(
         features=features,
         labels=labels,
         target_indices=target_indices,
         num_models=int(lira_config.get("num_reference_models", 64)),
-        hidden_dims=list(lira_config.get("reference_model_hidden_dims", [128, 64])),
-        epochs=int(lira_config.get("reference_model_epochs", 5)),
+        hidden_dims=ref_hidden_dims,
+        epochs=int(lira_config.get("reference_model_epochs", int(model_cfg.get("epochs", 5)))),
         sample_fraction=float(lira_config.get("reference_sample_fraction", 0.5)),
         device=device,
-        num_classes=int(config["model"]["num_classes"]),
+        num_classes=int(model_cfg["num_classes"]),
         cache_dir=cache_dir,
+        model_config=model_cfg,
+        feature_metadata=config.get("_feature_metadata"),
     )
     cache.compute_target_model_confidences(target_model, features, labels, target_indices, device)
 

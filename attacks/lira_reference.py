@@ -111,6 +111,8 @@ def train_reference_models(
     batch_size: int = 256,
     lr: float = 0.001,
     seed: int = 509,
+    model_config: dict | None = None,
+    feature_metadata: dict[str, object] | None = None,
 ) -> ReferenceModelCache:
     if cache_dir is not None:
         cache_path = cache_dir / f"lira_cache_n{num_models}_f{sample_fraction:.2f}.pkl"
@@ -139,10 +141,14 @@ def train_reference_models(
             if idx in subset_set:
                 membership_masks[model_idx, target_idx_to_pos[idx]] = True
 
-        model = _build_reference_model(input_dim, num_classes, hidden_dims)
+        model = _build_reference_model(
+            input_dim, num_classes, hidden_dims,
+            model_config=model_config, feature_metadata=feature_metadata,
+        )
         model = _train_model(
             model, features, labels, subset_indices,
-            device, epochs, batch_size, lr
+            device, epochs, batch_size, lr,
+            model_config=model_config,
         )
 
         confidences, correctness = _compute_confidences_and_correctness(
@@ -174,7 +180,23 @@ def _build_reference_model(
     num_classes: int,
     hidden_dims: list[int],
     dropout: float = 0.1,
+    model_config: dict | None = None,
+    feature_metadata: dict[str, object] | None = None,
 ) -> nn.Module:
+    # mirror build_teacher when a model_config is provided so the reference distribution
+    # matches the target distribution. Carlini requires reference models to use the same
+    # training procedure as the target; the architecture is half of that.
+    if model_config is not None:
+        from models.teacher import build_teacher
+        return build_teacher(
+            input_dim,
+            num_classes,
+            hidden_dims,
+            float(model_config.get("dropout", dropout)),
+            teacher_type=str(model_config.get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(model_config.get("embedding_dim", 16)),
+        )
     layers: list[nn.Module] = []
     prev_dim = input_dim
     for dim in hidden_dims:
@@ -197,6 +219,7 @@ def _train_model(
     epochs: int,
     batch_size: int,
     lr: float,
+    model_config: dict | None = None,
 ) -> nn.Module:
     model.to(device)
     model.train()
@@ -206,9 +229,27 @@ def _train_model(
     dataset = TensorDataset(train_features, train_labels)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
+    # when called with model_config, mirror the teacher's optimizer + scheduler. otherwise
+    # fall back to plain Adam (legacy path used by older callers/tests).
+    if model_config is not None:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(model_config.get("lr", lr)),
+            weight_decay=float(model_config.get("weight_decay", 0.0)),
+        )
+        scheduler = None
+        sched_cfg = model_config.get("scheduler", {})
+        if sched_cfg.get("enabled"):
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=int(sched_cfg.get("step_size", 20)),
+                gamma=float(sched_cfg.get("gamma", 0.5)),
+            )
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = None
 
+    criterion = nn.CrossEntropyLoss()
     for _ in range(epochs):
         for batch_features, batch_labels in loader:
             batch_features = batch_features.to(device)
@@ -218,6 +259,8 @@ def _train_model(
             loss = criterion(outputs, batch_labels)
             loss.backward()
             optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
     return model
 

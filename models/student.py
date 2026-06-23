@@ -8,12 +8,33 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from models.common import MLPClassifier, TrainResult, evaluate, save_checkpoint
+from models.common import MLPClassifier, TabularMLPClassifier, TrainResult, evaluate, save_checkpoint
 from utils import config_hash
 
 
-def build_student(input_dim: int, num_classes: int, hidden_dims: list[int], dropout: float) -> MLPClassifier:
-    # student is typically smaller than teacher
+def build_student(
+    input_dim: int,
+    num_classes: int,
+    hidden_dims: list[int],
+    dropout: float,
+    teacher_type: str = "mlp",
+    metadata: dict[str, object] | None = None,
+    embedding_dim: int = 16,
+):
+    # mirror build_teacher: when the teacher uses categorical embeddings, the student
+    # has to too. otherwise the privacy comparison is confounded with an input-pipeline
+    # asymmetry rather than the distillation procedure.
+    if teacher_type == "tabular_mlp" and metadata:
+        return TabularMLPClassifier(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            categorical_indices=list(metadata.get("categorical_indices", [])),
+            categorical_cardinalities=dict(metadata.get("categorical_cardinalities", {})),
+            max_attr_vals=metadata.get("max_attr_vals", []),
+            embedding_dim=embedding_dim,
+            hidden_dims=hidden_dims,
+            dropout=dropout,
+        )
     return MLPClassifier(input_dim=input_dim, num_classes=num_classes, hidden_dims=hidden_dims, dropout=dropout)
 
 

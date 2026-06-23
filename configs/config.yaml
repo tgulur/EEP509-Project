@@ -63,12 +63,12 @@ model:
 
 student:
   hidden_dims:
+    - 512
+    - 512
     - 256
-    - 256
-    - 128
-  temperature: 4.0
-  alpha: 0.5
-  epochs: 50
+  temperature: 2.0
+  alpha: 0.3
+  epochs: 75
   scheduler:
     enabled: true
     step_size: 20
@@ -82,7 +82,7 @@ mitigations:
   confidence_filter:
     top_fraction: 0.1
   bottleneck:
-    rank: 32
+    rank: 64
   nonorm:
     enabled: true
 
@@ -98,11 +98,10 @@ attacks:
     num_reference_models: 8
     epochs: 10
   lira_full:
-    num_reference_models: 64
-    reference_model_epochs: 5
-    reference_model_hidden_dims:
-      - 128
-      - 64
+    num_reference_models: 256
+    reference_model_epochs: 75
+    # reference_model_hidden_dims falls back to model.hidden_dims when omitted, which
+    # is what Carlini's recipe requires (architectural twins of the target).
     reference_sample_fraction: 0.5
     cache_dir: experiments/lira_cache
 
