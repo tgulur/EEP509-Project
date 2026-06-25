@@ -20,7 +20,7 @@ experiments/
 !experiments/.gitkeep
 
 # Documents - PDFs, papers, personal notes
-documents/
+# documents/
 
 # IDE / Editor
 .vscode/

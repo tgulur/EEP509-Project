@@ -248,7 +248,7 @@ def main() -> None:
         if teacher is None:
             teacher = _make_teacher(input_dim, config, feature_metadata)
             _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
-        mitigated_models = _build_mitigated_models(input_dim, config)
+        mitigated_models = _build_mitigated_models(input_dim, config, feature_metadata)
         for name, mitigated_model in mitigated_models.items():
             print(f"\n--- Training mitigated student: {name} ---")
             train_student(
@@ -423,9 +423,15 @@ def _train_confidence_filtered_student(
                   _checkpoint_path(config, "student_confidence_filter.pt"))
 
 
-def _build_mitigated_models(input_dim: int, config: dict) -> dict[str, torch.nn.Module]:
+def _build_mitigated_models(
+    input_dim: int,
+    config: dict,
+    feature_metadata: dict[str, object] | None = None,
+) -> dict[str, torch.nn.Module]:
     from models.mitigated import BottleneckStudent, build_nonorm_student
 
+    teacher_type = str(config["model"].get("teacher_type", "mlp"))
+    embedding_dim = int(config["model"].get("embedding_dim", 16))
     return {
         "bottleneck": BottleneckStudent(
             input_dim,
@@ -433,12 +439,18 @@ def _build_mitigated_models(input_dim: int, config: dict) -> dict[str, torch.nn.
             list(config["student"]["hidden_dims"]),
             float(config["model"]["dropout"]),
             int(config["mitigations"]["bottleneck"]["rank"]),
+            teacher_type=teacher_type,
+            metadata=feature_metadata,
+            embedding_dim=embedding_dim,
         ),
         "nonorm": build_nonorm_student(
             input_dim,
             int(config["model"]["num_classes"]),
             list(config["student"]["hidden_dims"]),
             float(config["model"]["dropout"]),
+            teacher_type=teacher_type,
+            metadata=feature_metadata,
+            embedding_dim=embedding_dim,
         ),
     }
 
@@ -649,7 +661,7 @@ def _build_student_for_mitigation(
             metadata=feature_metadata,
             embedding_dim=int(config["model"].get("embedding_dim", 16)),
         )
-    return _build_mitigated_models(input_dim, config)[name]
+    return _build_mitigated_models(input_dim, config, feature_metadata)[name]
 
 
 def run_full_lira_stage(
