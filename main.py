@@ -27,7 +27,10 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "prepare-data",
             "train-teacher",
+            "train-teacher-dp",
             "train-student",
+            "train-student-dmp",
+            "train-student-selena",
             "sweep-student",
             "train-mitigated",
             "run-attacks",
@@ -51,6 +54,18 @@ def parse_args() -> argparse.Namespace:
         "--resume-run",
         default=None,
         help="Resume a previous run by specifying its run-id (folder name under experiments/runs/).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override config[project][seed] for this invocation. Used by the multi-seed runner.",
+    )
+    parser.add_argument(
+        "--dp-epsilon",
+        type=float,
+        default=None,
+        help="Override config[dp][target_epsilon] for the train-teacher-dp stage. Used by the DP sweep runner.",
     )
     return parser.parse_args()
 
@@ -172,6 +187,11 @@ def main() -> None:
 
     config = load_config(args.config)
 
+    if args.seed is not None:
+        config["project"]["seed"] = int(args.seed)
+    if args.dp_epsilon is not None:
+        config.setdefault("dp", {})["target_epsilon"] = float(args.dp_epsilon)
+
     if args.stage == "list-runs":
         list_runs(config)
         return
@@ -222,6 +242,81 @@ def main() -> None:
     if args.stage in {"train-teacher", "all", "smoke"}:
         teacher = _make_teacher(input_dim, config, feature_metadata)
         train_teacher(teacher, loaders["train"], loaders["test"], device, config, _checkpoint_path(config, "teacher.pt"))
+
+    if args.stage == "train-teacher-dp":
+        from models.teacher_dp import train_teacher_dp
+        eps = float(config["dp"]["target_epsilon"])
+        eps_tag = f"eps{str(eps).replace('.', '')}"
+        dp_teacher = _make_teacher(input_dim, config, feature_metadata)
+        ckpt = _checkpoint_path(config, f"teacher_dp_{eps_tag}.pt")
+        result = train_teacher_dp(
+            dp_teacher, loaders["train"], loaders["test"], device, config, ckpt
+        )
+        print(f"DP teacher done: final eps={result.epsilon_achieved:.3f}, "
+              f"test_acc={result.eval_acc:.4f}, checkpoint={ckpt}")
+
+    if args.stage == "train-student-dmp":
+        if teacher is None:
+            teacher = _make_teacher(input_dim, config, feature_metadata)
+            _load_if_exists(teacher, _checkpoint_path(config, "teacher.pt"), device)
+        from models.dmp import train_dmp_student
+        from data_utils.splits import make_split_indices
+        from torch.utils.data import DataLoader
+        # DMP needs a reference partition disjoint from the training-set members.
+        # Take the next block of unused indices past the standard test split.
+        ref_size = int(config.get("dmp", {}).get("reference_size", 50000))
+        used = set(splits.train.tolist()) | set(splits.val.tolist()) | set(splits.test.tolist())
+        pool = [i for i in range(len(labels)) if i not in used][:ref_size]
+        if len(pool) < ref_size:
+            print(f"WARN: only {len(pool)} unused samples available for DMP reference (wanted {ref_size})")
+        from data_utils.texas100x import Texas100XDataset
+        ref_ds = Texas100XDataset(features, labels, member_indices=splits.train, indices=pool)
+        ref_loader = DataLoader(ref_ds, batch_size=int(config["data"]["batch_size"]), shuffle=True)
+
+        student = build_student(
+            input_dim,
+            int(config["model"]["num_classes"]),
+            list(config["student"]["hidden_dims"]),
+            float(config["model"]["dropout"]),
+            teacher_type=str(config["model"].get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(config["model"].get("embedding_dim", 16)),
+        )
+        train_dmp_student(
+            student, teacher, ref_loader, loaders["test"], device, config,
+            _checkpoint_path(config, "student_dmp.pt"),
+        )
+
+    if args.stage == "train-student-selena":
+        from models.selena import train_selena_submodels, compute_selena_soft_labels, train_selena_student
+        from data_utils.texas100x import Texas100XDataset
+        train_ds = Texas100XDataset(features, labels, member_indices=splits.train, indices=splits.train)
+
+        num_shards = int(config.get("selena", {}).get("num_shards", 25))
+        ckpt_dir = Path(_checkpoint_path(config, "")).parent / "selena_submodels"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        temperature = float(config["student"].get("temperature", 2.0))
+
+        submodels, shards = train_selena_submodels(
+            train_ds, loaders["test"], input_dim, device, config, feature_metadata, ckpt_dir,
+            num_shards=num_shards,
+        )
+        print(f"[SELENA] computing routed soft labels...")
+        soft_labels = compute_selena_soft_labels(submodels, shards, train_ds, device, temperature)
+
+        student = build_student(
+            input_dim,
+            int(config["model"]["num_classes"]),
+            list(config["student"]["hidden_dims"]),
+            float(config["model"]["dropout"]),
+            teacher_type=str(config["model"].get("teacher_type", "mlp")),
+            metadata=feature_metadata,
+            embedding_dim=int(config["model"].get("embedding_dim", 16)),
+        )
+        train_selena_student(
+            student, train_ds, soft_labels, loaders["test"], device, config,
+            _checkpoint_path(config, "student_selena.pt"),
+        )
 
     if args.stage in {"train-student", "all", "smoke"}:
         if teacher is None:
@@ -311,22 +406,33 @@ def _load_if_exists(model: torch.nn.Module, checkpoint_path: str, device: torch.
 
 def prepare_arrays(config: dict, synthetic: bool = False) -> tuple[np.ndarray, np.ndarray, SplitIndices]:
     from data_utils.splits import make_split_indices
-    from data_utils.texas100x import load_texas100x_arrays, make_synthetic_texas100x
+
+    dataset = str(config.get("dataset", "texas100x")).lower()
 
     if synthetic:
+        from data_utils.texas100x import make_synthetic_texas100x
         features, labels = make_synthetic_texas100x(
             num_samples=int(config["synthetic"]["num_samples"]),
             num_features=int(config["synthetic"]["num_features"]),
             num_classes=int(config["synthetic"]["num_classes"]),
             seed=int(config["project"]["seed"]),
         )
-    else:
+    elif dataset == "texas100x":
+        from data_utils.texas100x import load_texas100x_arrays
         ensure_processed_texas100x(config)
         features, labels = load_texas100x_arrays(
             config["paths"]["data_root"],
             label_column=config["data"]["label_column"],
             excluded_columns=config["data"]["excluded_columns"],
         )
+    elif dataset == "purchase100":
+        from data_utils.purchase100 import load_purchase100_arrays
+        features, labels = load_purchase100_arrays(config["paths"]["data_root"])
+    elif dataset == "cifar100":
+        from data_utils.cifar100 import load_cifar100_arrays
+        features, labels = load_cifar100_arrays(config["paths"]["data_root"])
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}. Set config[dataset] to one of: texas100x, purchase100, cifar100.")
     print(
         f"data rows={len(labels)} input_dim={features.shape[1]} classes={len(np.unique(labels))} "
         f"feature_min={float(np.nanmin(features)):.4f} feature_max={float(np.nanmax(features)):.4f}"
@@ -341,8 +447,14 @@ def prepare_arrays(config: dict, synthetic: bool = False) -> tuple[np.ndarray, n
 
 
 def get_feature_metadata(config: dict) -> dict[str, object]:
+    dataset = str(config.get("dataset", "texas100x")).lower()
+    if dataset == "purchase100":
+        from data_utils.purchase100 import load_feature_metadata
+        return load_feature_metadata(config["paths"]["data_root"])
+    if dataset == "cifar100":
+        from data_utils.cifar100 import load_feature_metadata
+        return load_feature_metadata(config["paths"]["data_root"])
     from data_utils.texas100x import load_feature_metadata
-
     return load_feature_metadata(
         config["paths"]["data_root"],
         excluded_columns=config["data"]["excluded_columns"],
@@ -625,6 +737,8 @@ def run_attack_suite(
         ("bottleneck", "student_bottleneck.pt"),
         ("nonorm", "student_nonorm.pt"),
         ("confidence_filter", "student_confidence_filter.pt"),
+        ("dmp", "student_dmp.pt"),
+        ("selena", "student_selena.pt"),
     ]
     for mitigation, ckpt_name in student_variants:
         model = _build_student_for_mitigation(mitigation, input_dim, config, feature_metadata)
@@ -642,6 +756,28 @@ def run_attack_suite(
             utility_metadata=md,
         )
 
+    # DP teacher checkpoints follow the teacher_dp_eps{value}.pt naming convention.
+    # Attack any that exist in this run dir, tagging mitigation with the eps value.
+    ckpt_dir = Path(_checkpoint_path(config, ""))
+    if ckpt_dir.exists():
+        from models.teacher_dp import fix_for_dp
+        for dp_ckpt in sorted(ckpt_dir.glob("teacher_dp_eps*.pt")):
+            eps_tag = dp_ckpt.stem.replace("teacher_dp_", "")
+            dp_teacher = fix_for_dp(_make_teacher(input_dim, config, feature_metadata))
+            md = _load_if_exists(dp_teacher, str(dp_ckpt), device)
+            if not md:
+                continue
+            run_attacks(
+                dp_teacher,
+                loaders["train"],
+                loaders["test"],
+                device,
+                config,
+                model_type="teacher_dp",
+                mitigation=eps_tag,
+                utility_metadata=md,
+            )
+
 
 def _build_student_for_mitigation(
     name: str,
@@ -651,7 +787,9 @@ def _build_student_for_mitigation(
 ) -> torch.nn.Module:
     from models.student import build_student
 
-    if name in ("none", "confidence_filter"):
+    # dmp and selena students share the same backbone as the vanilla student -
+    # they differ only in the training procedure, so a plain build_student is right.
+    if name in ("none", "confidence_filter", "dmp", "selena"):
         return build_student(
             input_dim,
             int(config["model"]["num_classes"]),
